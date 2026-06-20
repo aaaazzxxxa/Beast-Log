@@ -797,7 +797,7 @@ function resolveByKind(item, kind) {
         activity: { result: '함께함', exp: 2, rep: 0, drop: null, inner: { foe: '그 시간을 나쁘지 않게 보냈다.', user: '당신은 즐거웠다고 인정하긴 싫었을 것이다.' } },
         loot: { result: '주움', exp: 2, rep: 0, drop: { name: '녹슨 숟가락', emoji: '🥄', price: 0 }, inner: { foe: '아무도 안 주운 데는 이유가 있었다.', user: '당신은 왜 주웠는지 모를 것이다.' } },
         interact: { result: '기웃', exp: 1, rep: 0, drop: null, inner: { foe: '별 반응이 없었다.', user: '당신은 괜히 건드렸다 싶었을 것이다.' } },
-        attack: { result: '시비', exp: 2, rep: -1, drop: null, inner: { foe: '상대는 황당해했다. 뭐 이런 게 다 있나.', user: '당신은 왜 그랬는지 스스로도 몰랐을 것이다.' } },
+        attack: { result: '시비', exp: -3, rep: -1, drop: null, inner: { foe: '상대는 황당해했다. 뭐 이런 게 다 있나.', user: '당신은 왜 그랬는지 스스로도 몰랐을 것이다.' } },
     };
     return base[kind] || base.interact;
 }
@@ -926,7 +926,7 @@ function buildResolvePrompt(item, choiceLabel, kind, history) {
     }
     return `RP 이벤트의 "결과"와 "뒷소문"을 만든다.
 이벤트: ${item.title} / 선택: ${choiceLabel} (kind:${kind})
-${relCtx}${hist}규칙: 데드팬 코미디, 한국어. exp=경험치 정수. rep=평판 변화 정수(좋은 행동 +, 괜히 시비/민폐 -). affDelta=관계 변화 정수(없으면 0).
+${relCtx}${hist}규칙: 데드팬 코미디, 한국어. exp=경험치 정수(좋은/생산적 선택은 +1~4, 시비·민폐 등 나쁜 선택은 -1~-3). rep=평판 변화 정수(좋은 행동 +, 괜히 시비/민폐 -). affDelta=관계 변화 정수(없으면 0).
 inner.foe=상대/주변의 진짜 속내(수치와 어긋나도 됨, 그게 재미). inner.user=유저 속내 추측("~했을지도/~었을 것이다" 식 단정 금지).
 after=가끔만(대개 null) 며칠 뒤 오해/뒷이야기 한 줄. drop=주운 물건 있으면 {name,emoji,price:0}, 없으면 null.
 대상(인물/생물)이 있으면: npcMemory=그 대상에 대해 오래 남을 한 줄 기억(없으면 null), npcState=그 대상의 현재 상태 짧게(없으면 null).
@@ -975,10 +975,12 @@ function normalizeEvent(o, cat) {
 }
 function normalizeOutcome(o, kind) {
     o = o || {};
+    let exp = Number.isFinite(o.exp) ? o.exp : (kind === 'attack' ? -3 : 1);
+    if (kind === 'attack') exp = -Math.abs(exp || 3);   // 나쁜 선택(시비)은 항상 경험치 손해
     return {
         result: String(o.result || '결과'),
         summary: (o.summary && o.summary !== 'null') ? String(o.summary).slice(0, 40) : null,
-        exp: Number.isFinite(o.exp) ? o.exp : 1,
+        exp,
         rep: Number.isFinite(o.rep) ? o.rep : 0,
         affDelta: Number.isFinite(o.affDelta) ? o.affDelta : affinityDelta(kind),
         drop: (o.drop && o.drop.name) ? { name: String(o.drop.name), emoji: String(o.drop.emoji || '📦'), price: o.drop.price || 0 } : null,
@@ -1000,15 +1002,17 @@ function handleLlmError(err) {
 }
 
 function applyOutcome(item, choiceLabel, outcome, kind) {
-    STATE.xp += outcome.exp || 0;
+    const rawExp = outcome.exp || 0;
+    const eff = gainXp(rawExp);   // 상태 나쁘면 양수 XP 효율↓ (음수 벌점은 그대로)
     STATE.rep = (STATE.rep || 0) + (outcome.rep || 0);
     const rarity = outcome.drop ? rollRarity() : 'common';
     const itemType = outcome.drop ? rollItemType(rarity) : null;
     const affDelta = item.foe ? (Number.isFinite(outcome.affDelta) ? outcome.affDelta : affinityDelta(kind)) : 0;
+    const shownExp = rawExp > 0 ? Math.max(1, Math.round(rawExp * eff)) : rawExp;   // 실제 반영된 양
     const entry = {
         id: cryptoId(), no: STATE.encounters.length + 1, time: nowHHMM(), category: item.category || 'npc',
         emoji: item.emoji, title: item.title, desc: `${choiceLabel} — ${outcome.result}`, summary: outcome.summary || null,
-        result: outcome.result, exp: outcome.exp, rep: outcome.rep || 0, rarity, affDelta, foe: item.foe || null,
+        result: outcome.result, exp: shownExp, rep: outcome.rep || 0, rarity, affDelta, foe: item.foe || null,
         drop: outcome.drop ? outcome.drop.name : null, dropBait: itemType === 'bait',
         inner: outcome.inner, after: (outcome.after || rollAfter()), _noNews: pick(NO_NEWS), revealed: false, open: false,
     };
@@ -1050,6 +1054,7 @@ function applyOutcome(item, choiceLabel, outcome, kind) {
     if (STATE.hunger <= 0) { STATE.mood = clamp0100(STATE.mood - 5); STATE.hp = clamp0100(STATE.hp - 5); }   // 굶으면 방치 페널티
 
     levelCheck();
+    if (rawExp > 0 && eff < 1) flash(`💤 컨디션이 나빠 경험치 ${Math.round(eff * 100)}%만…`);   // 방치하면 덜 큼
     saveState(STATE);
     renderAll();
     refreshMemory();
@@ -1057,6 +1062,24 @@ function applyOutcome(item, choiceLabel, outcome, kind) {
 }
 function clamp0100(n) { return Math.max(0, Math.min(100, Math.round(n))); }
 function clamp05(n) { return clamp0100(n); }  // 하위호환 별칭
+// 상태(기분·배고픔·체력 평균)에 따른 경험치 효율 배율 — 잘 돌봐야 잘 큰다 (양수 XP에만 적용)
+function xpEfficiency() {
+    const avg = ((STATE.mood || 0) + (STATE.hunger || 0) + (STATE.hp || 0)) / 3;
+    if (avg >= 70) return 1.0;     // 잘 돌봄 → 풀로
+    if (avg >= 40) return 0.7;     // 보통 → 70%
+    if (avg >= 20) return 0.4;     // 방치 시작 → 40%
+    return 0.1;                    // 막 굶김 → 10% (그래도 0은 아님)
+}
+// 경험치 효율을 반영해 XP 지급 (음수=벌점은 그대로, 양수=보상만 배율)
+function gainXp(amount) {
+    if (amount > 0) {
+        const eff = xpEfficiency();
+        STATE.xp += Math.max(1, Math.round(amount * eff));   // 효율 낮아도 최소 1은 줌
+        return eff;
+    }
+    STATE.xp += amount;   // 음수(나쁜 선택 벌점)는 그대로
+    return 1;
+}
 function levelNeed(lv) { return Math.round(120 + lv * lv * 28); }   // 제곱 곡선(더 상향): 경험치 천천히 참
 function levelCheck() {
     let need = levelNeed(STATE.level);
@@ -1554,7 +1577,7 @@ function afterBlock(e) {
     return innerWrap + rare;
 }
 function chipsHtml(e) {
-    return `${e.affDelta ? `<span class="bl-chip">❤️ ${e.affDelta > 0 ? '+' : ''}${e.affDelta}</span>` : ''}${e.rep ? `<span class="bl-chip">⭐ ${e.rep > 0 ? '+' : ''}${e.rep}</span>` : ''}<span class="bl-chip">EXP +${e.exp}</span>${e.drop ? `<span class="bl-chip">${e.dropBait ? '🎣 ' : ''}${escapeHtml(e.drop)}</span>` : ''}`;
+    return `${e.affDelta ? `<span class="bl-chip">❤️ ${e.affDelta > 0 ? '+' : ''}${e.affDelta}</span>` : ''}${e.rep ? `<span class="bl-chip">⭐ ${e.rep > 0 ? '+' : ''}${e.rep}</span>` : ''}<span class="bl-chip">EXP ${e.exp >= 0 ? '+' : ''}${e.exp}</span>${e.drop ? `<span class="bl-chip">${e.dropBait ? '🎣 ' : ''}${escapeHtml(e.drop)}</span>` : ''}`;
 }
 function dexCard(n) {
     const disp = n.nickname || n.name;
