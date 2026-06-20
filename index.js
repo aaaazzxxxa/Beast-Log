@@ -323,6 +323,9 @@ function startBlink() {
 }
 function curMascot() { return MASCOTS[EXT.mascot] || MASCOTS.tiger; }
 function evoStage(lv) { const st = curMascot().stages; for (const e of st) { if (lv >= e.min) return e; } return st[st.length - 1]; }
+// 펫 표시 이름: 직접 지은 이름이 있으면 그걸, 없으면 진화 단계명
+function petDisplayName() { return (STATE.petName && STATE.petName.trim()) ? STATE.petName.trim() : evoStage(STATE.level).name; }
+const RENAME_PRICE = 50000;   // 작명소 이용료 (첫 작명은 무료, 이후 변경은 유료 — 함부로 못 바꾸게)
 
 // ── 희귀도 / 아이템 타입 ──
 const RARITY = { common: { label: '일반', dot: '⚪' }, rare: { label: '희귀', dot: '🟢' }, epic: { label: '영웅', dot: '🔵' }, legend: { label: '전설', dot: '🟣' } };
@@ -353,13 +356,21 @@ function fmtMoney(n) { return (n || 0).toLocaleString('ko-KR') + '원'; }
 function jobRemaining() { const cd = (STATE.jobCD == null ? 3 : STATE.jobCD); return Math.max(0, cd - (getChatLen() - (STATE.lastJobTurn == null ? -99 : STATE.lastJobTurn))); }
 function canWork() { return jobRemaining() <= 0; }
 function buildJobPrompt() {
-    return `너는 RP 주인공({{char}})이 잠깐 뛴 "알바"와 그 결과를 만든다.
+    const members = groupMemberNames();
+    const whoLine = members.length > 1
+        ? `이 채팅엔 여러 캐릭터(${members.join(', ')})가 있다. 그 중 상황상 가장 어울리는 캐릭터 한 명이 알바를 뛰고 왔다. 그 한 명을 골라 그의 시점·성격으로 써라.`
+        : `이 RP에 등장하는 캐릭터 중 한 명이 직접 알바를 뛰고 왔다. (대화 맥락에 여러 명이 나오면 — 한 카드에 여러 인물이 설정돼 있든, 여럿이 등장하든 — 그 중 지금 상황에 가장 어울리는 한 명을 골라라. 한 명만 있으면 그 캐릭터다.)`;
+    return `RP 속 캐릭터가 잠깐 "알바"를 뛰고 온 상황이다. 그 알바와 결과를 만든다. (유저나 펫이 아니라, RP 캐릭터가 일한 것)
+${whoLine}
 ${getScene()}규칙:
-- {{char}}의 세계/처지에 맞는 알바를 골라라. 판타지면 용병·약초 채집·여관 설거지, 현대면 편의점·전단지, SF면 화물 하역 등. 장면에서 끌어내라. 세계관에 안 맞는 알바 금지(판타지에 편의점 X).
+- 그 캐릭터의 세계/처지/성격에 맞는 알바를 골라라. 판타지면 용병·약초 채집·여관 설거지, 현대면 편의점·전단지, SF면 화물 하역 등. 장면에서 끌어내라. 세계관에 안 맞는 알바 금지(판타지에 편의점 X).
+- **그 캐릭터의 성격이 후기(report)와 소감(mood)에 묻어나게 하라.** 무뚝뚝하면 무뚝뚝하게, 거만하면 투덜대며, 성실하면 묵묵하게.
+- report와 mood는 **그 캐릭터 본인이 직접 겪고 말하는 시점**으로 써라. 그 캐릭터를 제3자처럼 부르거나(예: "○○에게 빌려라"), 유저/펫이 시킨 것처럼 쓰지 마라. 어디까지나 그 캐릭터가 스스로 다녀온 알바다.
+- **who에는 실제로 알바를 뛴 그 캐릭터의 이름을 정확히 적어라** (대화에 나온 이름 그대로).
 - 데드팬 코미디. 짧은 알바 후기 한 편.
 - 보수는 짜다(현실 알바처럼 적게). 단위는 정수 '원' 환산값으로 pay에 넣어라(대략 20000~90000, 사건 나면 더 적거나 0).
 - 가끔(30%) 사건/사고(incident)로 보수가 깎이거나 황당한 일.
-형식(JSON만, 코드펜스 금지): {"job":"알바 이름/장소","report":"2~3문장 데드팬 후기","pay":정수,"incident":"한 줄 사건 또는 null","mood":"{{char}}의 한 줄 소감"}
+형식(JSON만, 코드펜스 금지): {"who":"알바 뛴 캐릭터 이름","job":"알바 이름/장소","report":"그 캐릭터가 일하고 온 2~3문장 데드팬 후기","pay":정수,"incident":"한 줄 사건 또는 null","mood":"그 캐릭터의 한 줄 소감"}
 [대화 맥락]
 ${getConvo()}`;
 }
@@ -402,6 +413,7 @@ function normalizeJob(o) {
     let pay = parseInt(o.pay, 10); if (!Number.isFinite(pay)) pay = 30000;
     pay = Math.max(0, Math.min(200000, pay));
     return {
+        who: (o.who && o.who !== 'null') ? String(o.who).slice(0, 24) : '',
         job: String(o.job || '이름 모를 알바').slice(0, 40),
         report: String(o.report || '시간만 흘렀다.').slice(0, 400),
         pay,
@@ -412,7 +424,7 @@ function normalizeJob(o) {
 let _blBusy = false;
 async function onWork() {
     if (_blBusy) return;
-    if (!canWork()) { flash(`아직 지쳤다 — ${jobRemaining()}턴 쉬어야`); return; }
+    if (!canWork()) { flash(`아직 일하고 온 지 얼마 안 됐어요 — ${jobRemaining()}턴 뒤에`); return; }
     _blBusy = true;
     showLoading(pick(JOB_LOAD));
     try {
@@ -621,10 +633,12 @@ function shopListHtml() {
 }
 function showJobResult(job) {
     closePopup();
+    const ctx = getCtx();
+    const charName = (job.who && job.who.trim()) ? job.who.trim() : ((ctx && ctx.name2) ? ctx.name2 : '');
     const pop = document.createElement('div'); pop.id = 'beastlog-popup';
     pop.innerHTML = `
       <div class="bl-pop-card bl-cat-npc">
-        <div class="bl-pop-badge">🛠️ 알바 후기</div>
+        <div class="bl-pop-badge">🛠️ ${charName ? escapeHtml(charName) + '의 ' : ''}알바 후기</div>
         <div class="bl-pop-title">${escapeHtml(job.job)}</div>
         <div class="bl-job-report">${escapeHtml(job.report)}</div>
         ${job.incident ? `<div class="bl-af-rare">⚠️ ${escapeHtml(job.incident)}</div>` : ''}
@@ -660,7 +674,7 @@ const STATE_KEY = 'beast_log_state';
 function defaultState() {
     return {
         uuid: cryptoId(), level: 1, xp: 0, title: '갓 들어온 손님', rep: 0,
-        mood: 80, hunger: 80, hp: 100,
+        mood: 80, hunger: 80, hp: 100, petName: '',
         items: [], encounters: [], npcs: {},
         currentNpc: null, currentSituation: null,
         money: 0, owned: ['tiger', 'cat', 'dog'], lastJobTurn: -99, lastJob: null, jobs: [],
@@ -869,12 +883,35 @@ async function llmGenerate(prompt, maxTokens) {
     }
     throw { code: 'nogen' };
 }
+// 그룹챗이면 멤버 캐릭터 이름들, 1:1이면 [name2] 하나. 빈 배열 가능.
+function groupMemberNames() {
+    const ctx = getCtx(); if (!ctx) return [];
+    try {
+        if (ctx.groupId && Array.isArray(ctx.groups) && Array.isArray(ctx.characters)) {
+            const g = ctx.groups.find(x => x.id == ctx.groupId);
+            if (g && Array.isArray(g.members) && g.members.length) {
+                const names = g.members.map(av => {
+                    const c = ctx.characters.find(ch => ch.avatar === av);
+                    return c ? c.name : null;
+                }).filter(Boolean);
+                if (names.length) return names;
+            }
+        }
+    } catch (e) { /* noop */ }
+    return ctx.name2 ? [ctx.name2] : [];
+}
 function getScene() {
     const ctx = getCtx(); if (!ctx) return '';
     const sub = s => stripTags(String(s || '')).replace(/\{\{user\}\}/gi, ctx.name1 || '유저').replace(/\{\{char\}\}/gi, ctx.name2 || '상대');
     const bits = [];
     try {
-        if (ctx.name2) bits.push(`상대 캐릭터: ${ctx.name2}`);
+        // 그룹챗이면 멤버 전원, 1:1이면 단일 캐릭터
+        const members = groupMemberNames();
+        if (members.length > 1) {
+            bits.push(`등장 캐릭터(그룹): ${members.join(', ')}`);
+        } else if (ctx.name2) {
+            bits.push(`상대 캐릭터: ${ctx.name2}`);
+        }
         const char = ctx.characters && ctx.characters[ctx.characterId];
         if (char) {
             const d = char.data || {};
@@ -913,7 +950,7 @@ ${RULES_FIT}
 ${getScene()}[대화 맥락]
 ${getConvo()}`;
 }
-function buildResolvePrompt(item, choiceLabel, kind, history) {
+function buildResolvePrompt(item, choiceLabel, kind, history, backfire) {
     const hist = (history && history.length)
         ? `이 조우는 여러 박자로 이어졌다:\n${history.map((h, i) => `${i + 1}. ${h.title} → 선택: ${h.choice}`).join('\n')}\n그리고 마지막 선택: ${choiceLabel}\n결과/후일담은 이 전체 흐름을 반영해라.\n`
         : '';
@@ -924,9 +961,12 @@ function buildResolvePrompt(item, choiceLabel, kind, history) {
         relCtx = `[이 대상과의 기존 관계] ${n.nickname || n.name} · 관계: ${n.tier} · ${n.metCount}번째 만남${n.lastPlace ? ` · 주 출몰: ${n.lastPlace}` : ''}${n.state && n.state !== '평범함' ? ` · 최근 상태: ${n.state}` : ''}${n.memory ? ` · 기억: ${stripTags(n.memory)}` : ''}.
 이 관계 단계에 맞게 반응해라 — 차가우면(경계/불신/피함) 상대가 거리를 두거나 경계/회피하고(예: 현금통을 끌어당김, 손을 피해 담장 위로 올라감), 따뜻하면(익숙함/단골) 반갑게 군다. inner.foe와 after에 그 온도가 묻어나야 한다.\n`;
     }
+    const backfireRule = backfire
+        ? `\n★중요(이번 결과는 "예상 못한 역효과"다): 선택 자체는 멀쩡했는데 운 나쁘게/엉뚱하게 일이 꼬여 나쁜 결과가 났다. 선의가 오해를 부르거나, 도우려다 사고가 나거나, 좋게 끝날 줄 알았는데 뒤통수 맞는 식. 억지스럽지 않게, 그 장면에서 "아 그럴 수도 있겠다" 싶은 자연스러운 불운으로. 데드팬하게. 반드시 exp는 음수(-1~-3), rep도 0 이하로 매겨라. result/summary에도 일이 틀어졌음이 드러나게.\n`
+        : '';
     return `RP 이벤트의 "결과"와 "뒷소문"을 만든다.
 이벤트: ${item.title} / 선택: ${choiceLabel} (kind:${kind})
-${relCtx}${hist}규칙: 데드팬 코미디, 한국어. exp=경험치 정수(좋은/생산적 선택은 +1~4, 시비·민폐 등 나쁜 선택은 -1~-3). rep=평판 변화 정수(좋은 행동 +, 괜히 시비/민폐 -). affDelta=관계 변화 정수(없으면 0).
+${relCtx}${hist}${backfireRule}규칙: 데드팬 코미디, 한국어. exp=경험치 정수(좋은/생산적 선택은 +1~4, 시비·민폐 등 나쁜 선택은 -1~-3). rep=평판 변화 정수(좋은 행동 +, 괜히 시비/민폐 -). affDelta=관계 변화 정수(없으면 0).
 inner.foe=상대/주변의 진짜 속내(수치와 어긋나도 됨, 그게 재미). inner.user=유저 속내 추측("~했을지도/~었을 것이다" 식 단정 금지).
 after=가끔만(대개 null) 며칠 뒤 오해/뒷이야기 한 줄. drop=주운 물건 있으면 {name,emoji,price:0}, 없으면 null.
 대상(인물/생물)이 있으면: npcMemory=그 대상에 대해 오래 남을 한 줄 기억(없으면 null), npcState=그 대상의 현재 상태 짧게(없으면 null).
@@ -1003,6 +1043,7 @@ function handleLlmError(err) {
 
 function applyOutcome(item, choiceLabel, outcome, kind) {
     const rawExp = outcome.exp || 0;
+    const backfireFlag = outcome._backfire === true;
     const eff = gainXp(rawExp);   // 상태 나쁘면 양수 XP 효율↓ (음수 벌점은 그대로)
     STATE.rep = (STATE.rep || 0) + (outcome.rep || 0);
     const rarity = outcome.drop ? rollRarity() : 'common';
@@ -1012,7 +1053,7 @@ function applyOutcome(item, choiceLabel, outcome, kind) {
     const entry = {
         id: cryptoId(), no: STATE.encounters.length + 1, time: nowHHMM(), category: item.category || 'npc',
         emoji: item.emoji, title: item.title, desc: `${choiceLabel} — ${outcome.result}`, summary: outcome.summary || null,
-        result: outcome.result, exp: shownExp, rep: outcome.rep || 0, rarity, affDelta, foe: item.foe || null,
+        result: outcome.result, exp: shownExp, rep: outcome.rep || 0, rarity, affDelta, foe: item.foe || null, backfire: outcome._backfire === true,
         drop: outcome.drop ? outcome.drop.name : null, dropBait: itemType === 'bait',
         inner: outcome.inner, after: (outcome.after || rollAfter()), _noNews: pick(NO_NEWS), revealed: false, open: false,
     };
@@ -1050,6 +1091,10 @@ function applyOutcome(item, choiceLabel, outcome, kind) {
     if (outcome.rep > 0) STATE.mood = clamp0100(STATE.mood + 8);          // 좋은 조우 → 기분↑
     else if (outcome.rep < 0) STATE.mood = clamp0100(STATE.mood - 8);     // 나쁜 조우 → 기분↓
     if (kind === 'attack') { STATE.hp = clamp0100(STATE.hp - 10); STATE.mood = clamp0100(STATE.mood - 8); }  // 싸움 → 체력·기분↓
+    else if (kind !== 'flee' && Math.random() < 0.4) {                    // 회피·시비 외 활동은 가끔 기운 소모
+        STATE.hp = clamp0100(STATE.hp - (2 + Math.floor(Math.random() * 5)));   // 랜덤 -2~-6
+    }
+    if (backfireFlag) STATE.hp = clamp0100(STATE.hp - (3 + Math.floor(Math.random() * 4)));   // 예상 못한 사고 → 체력 추가 -3~-6
     if (STATE.encounters.length % 3 === 0) STATE.hunger = clamp0100(STATE.hunger - 8);                     // 활동하면 배고파짐
     if (STATE.hunger <= 0) { STATE.mood = clamp0100(STATE.mood - 5); STATE.hp = clamp0100(STATE.hp - 5); }   // 굶으면 방치 페널티
 
@@ -1361,7 +1406,7 @@ function renderConsole() {
     if (!consoleEl) return;
     const evo = evoStage(STATE.level), need = levelNeed(STATE.level);
     consoleEl.querySelector('.bl-pet-emoji-mini').innerHTML = mascotSVG(30);
-    consoleEl.querySelector('.bl-pet-name').textContent = evo.name;
+    consoleEl.querySelector('.bl-pet-name').textContent = petDisplayName();
     consoleEl.querySelector('.bl-lv').textContent = 'Lv.' + String(STATE.level).padStart(2, '0');
     consoleEl.querySelector('.bl-st-mood').textContent = statPct('😊', '', STATE.mood);
     consoleEl.querySelector('.bl-st-hunger').textContent = statPct('🍖', '', STATE.hunger);
@@ -1403,7 +1448,10 @@ function buildFull() {
         <div class="bl-full-body">
           <div class="bl-tab-panel" data-panel="main">
           <div class="bl-pet-card">
-            <div class="bl-pet-top"><span class="bl-pet-name"></span><span class="bl-pet-lv">Lv.<b class="num bl-pet-lvnum"></b></span></div>
+            <div class="bl-pet-namebox">
+              <div class="bl-pet-top"><span class="bl-pet-name"></span><button class="bl-rename-btn" title="이름 짓기 (작명소)">✏️</button><span class="bl-pet-lv">Lv.<b class="num bl-pet-lvnum"></b></span></div>
+              <div class="bl-pet-stage"></div>
+            </div>
             <div class="bl-pet"><span class="bl-pet-emoji"></span></div>
             <div class="bl-status">
               <span class="bl-st">😊 기분 <b class="bl-st-mood"></b></span>
@@ -1443,7 +1491,7 @@ function buildFull() {
                 <div class="bl-acc-head"><h3>🛠️ 알바 내역</h3><span class="bl-rule"></span><span class="bl-job-cnt num"></span><button class="bl-clear-btn bl-jobs-clear" title="전체 비우기">🧹</button><span class="bl-chev">▾</span></div>
                 <div class="bl-acc-body"><div class="bl-jobs-list"></div></div>
               </div>
-              <div class="bl-work-tip">RP 주인공이 세계관에 맞는 알바를 뜀. 보수는 짜다. 가끔 사건 터짐. (알바하면 살짝 배고파짐)</div>
+              <div class="bl-work-tip">RP 캐릭터가 직접 세계관에 맞는 알바를 뛰고 와요. 성격이 후기에 묻어남. 보수는 짜고 가끔 사건도 터져요. (알바하면 살짝 배고파짐)</div>
             </div>
           </div>
           <div class="bl-tab-panel" data-panel="quest" hidden>
@@ -1517,6 +1565,7 @@ function buildFull() {
     fullEl.querySelector('.bl-work-go').addEventListener('click', onWork);
     fullEl.querySelector('.bl-donate').addEventListener('click', onDonate);
     { const fb = fullEl.querySelector('.bl-feed'); if (fb) fb.addEventListener('click', onFeed); }
+    { const rb = fullEl.querySelector('.bl-rename-btn'); if (rb) rb.addEventListener('click', onRename); }
     { const qn = fullEl.querySelector('.bl-quest-new'); if (qn) qn.addEventListener('click', onNewQuest); }
     { const ql = fullEl.querySelector('.bl-quest-list'); if (ql) ql.addEventListener('click', e => {
         const c = e.target.closest('.bl-quest-check'); if (c) { onCheckQuest(c.dataset.id); return; }
@@ -1641,7 +1690,8 @@ function renderFull() {
     if (!fullEl) return;
     const evo = evoStage(STATE.level), need = levelNeed(STATE.level);
     fullEl.querySelector('.bl-pet-emoji').innerHTML = mascotSVG(72);
-    fullEl.querySelector('.bl-pet-name').textContent = evo.name;
+    fullEl.querySelector('.bl-pet-name').textContent = petDisplayName();
+    { const sub = fullEl.querySelector('.bl-pet-stage'); if (sub) sub.textContent = (STATE.petName && STATE.petName.trim()) ? evo.name : curMascot().label; }
     fullEl.querySelector('.bl-pet-lvnum').textContent = String(STATE.level).padStart(2, '0');
     fullEl.querySelector('.bl-st-mood').textContent = clamp0100(STATE.mood) + '%';
     fullEl.querySelector('.bl-st-hunger').textContent = clamp0100(STATE.hunger) + '%';
@@ -1677,7 +1727,7 @@ function renderFull() {
     fullEl.querySelector('.bl-enc-list').innerHTML = STATE.encounters.length
         ? STATE.encounters.map(e => `
             <div class="bl-ticket bl-tk-${e.category || 'npc'}${e.open ? '' : ' collapsed'}" data-id="${e.id}">
-              <div class="bl-tk-head"><span class="bl-tk-time num">${e.time || ''}</span><span class="bl-tk-emoji">${e.emoji}</span><span class="bl-tk-title">${escapeHtml(tkLabel(e))}</span>${e.rarity && e.rarity !== 'common' ? `<span class="bl-tk-rar">${RARITY[e.rarity].dot}</span>` : ''}<span class="bl-tk-chev">▾</span></div>
+              <div class="bl-tk-head"><span class="bl-tk-time num">${e.time || ''}</span><span class="bl-tk-emoji">${e.emoji}</span><span class="bl-tk-title">${e.backfire ? '💥 ' : ''}${escapeHtml(tkLabel(e))}</span>${e.rarity && e.rarity !== 'common' ? `<span class="bl-tk-rar">${RARITY[e.rarity].dot}</span>` : ''}<span class="bl-tk-chev">▾</span></div>
               <div class="bl-tk-body">
                 <div class="bl-tk-fulltitle">${escapeHtml(e.title)}</div>
                 <div class="bl-tk-desc">${escapeHtml(e.desc)}</div>
@@ -1932,9 +1982,16 @@ function showChoicePopup(item, chain) {
 }
 async function resolveAndApply(orig, c, history) {
     showLoading(pick(LOAD_RESOLVE));
+    // 예상 못한 역효과: 회피·이미 나쁜 선택(시비)을 뺀 나머지에서 가끔(18%) 발동 — 멀쩡한 선택이 운 나쁘게 꼬임
+    const backfire = (c.kind !== 'flee' && c.kind !== 'attack') && Math.random() < 0.18;
     try {
-        const txt = await llmGenerate(buildResolvePrompt(orig, c.label, c.kind, history), 4096);
+        const txt = await llmGenerate(buildResolvePrompt(orig, c.label, c.kind, history, backfire), 4096);
         const outcome = normalizeOutcome(parseLLMJson(txt), c.kind);
+        if (backfire) {   // 역효과면 경험치·평판을 음수로 강제 (LLM이 안 따랐을 때 대비)
+            if (!(outcome.exp < 0)) outcome.exp = -(1 + Math.floor(Math.random() * 3));   // -1~-3
+            if (outcome.rep > 0) outcome.rep = 0;
+            outcome._backfire = true;
+        }
         closePopup(); applyOutcome(orig, c.label, outcome, c.kind);
     } catch (err) { closePopup(); if (!handleLlmError(err)) applyOutcome(orig, c.label, resolveByKind(orig, c.kind), c.kind); }
 }
@@ -1945,7 +2002,7 @@ function showResultPopup(entry) {
     const pop = document.createElement('div'); pop.id = 'beastlog-popup';
     pop.innerHTML = `
       <div class="bl-pop-card bl-cat-${entry.category}">
-        <div class="bl-pop-badge">🎭 결과</div>
+        <div class="bl-pop-badge">${entry.backfire ? '💥 예상 못한 전개' : '🎭 결과'}</div>
         <div class="bl-pop-title">${escapeHtml(entry.result)}</div>
         <div class="bl-pop-chips">${chipsHtml(entry)}</div>
         ${afterBlock(entry)}
@@ -1996,6 +2053,39 @@ function showConfirm(title, msg, onYes) {
     mountPopup(pop);
     pop.querySelector('.bl-rename-cancel').addEventListener('click', closePopup);
     pop.querySelector('.bl-confirm-yes').addEventListener('click', () => { closePopup(); try { onYes(); } catch (e) { /* noop */ } });
+}
+function onRename() {
+    const money = STATE.money || 0;
+    const cur = (STATE.petName && STATE.petName.trim()) ? STATE.petName.trim() : '';
+    const free = !cur;   // 처음 짓기는 무료, 이후 변경은 유료
+    if (!free && money < RENAME_PRICE) {
+        showAlarm('작명소', `이름을 바꾸려면 ${fmtMoney(RENAME_PRICE)}이 필요해요.\n(지금 ${fmtMoney(RENAME_PRICE - money)} 모자라요)`);
+        return;
+    }
+    closePopup();
+    const pop = document.createElement('div'); pop.id = 'beastlog-popup';
+    const feeLine = free ? '첫 작명은 무료예요!' : `이름 변경: ${fmtMoney(RENAME_PRICE)}`;
+    pop.innerHTML = `<div class="bl-pop-card bl-alarm">
+        <div class="bl-alarm-title">🏷️ 작명소</div>
+        <div class="bl-alarm-msg">${feeLine}</div>
+        <input class="bl-rename-input" type="text" maxlength="16" placeholder="펫 이름 (최대 16자)" value="${escapeHtml(cur)}" />
+        <div class="bl-rename-btns"><button class="bl-rename-cancel">취소</button><button class="bl-rename-ok">${free ? '짓기' : '바꾸기'}</button></div>
+      </div>`;
+    mountPopup(pop);
+    const input = pop.querySelector('.bl-rename-input');
+    setTimeout(() => { try { input.focus(); } catch (e) { /* noop */ } }, 50);
+    const submit = () => {
+        const name = (input.value || '').trim().slice(0, 16);
+        if (!name) { closePopup(); return; }
+        if (name === cur) { closePopup(); return; }   // 변경 없음 → 무료
+        if (!free) STATE.money = (STATE.money || 0) - RENAME_PRICE;
+        STATE.petName = name;
+        saveState(STATE); renderAll(); closePopup();
+        flash(`🏷️ 이름이 '${name}'(으)로 정해졌어요`);
+    };
+    pop.querySelector('.bl-rename-cancel').addEventListener('click', closePopup);
+    pop.querySelector('.bl-rename-ok').addEventListener('click', submit);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
 }
 function showLoading(msg) {
     closePopup();
